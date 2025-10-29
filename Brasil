@@ -1,0 +1,187 @@
+-- BrainrotServer.lua (Script en ServerScriptService)
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local OUTPUT_FOLDER = Workspace:WaitForChild("Brainrots")
+local INVIS_DURATION = 6 -- segundos que dura la invisibilidad
+local PICKUP_COOLDOWN = 1 -- debounce para evitar double-trigger
+
+local STOLEN_EVENT = ReplicatedStorage:WaitForChild("BrainrotStolen")
+
+-- Asegura leaderstats simple para contar Brainrots recogidos
+local function ensureLeaderstats(player)
+	if player:FindFirstChild("leaderstats") then return end
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local brCount = Instance.new("IntValue")
+	brCount.Name = "Brainrots"
+	brCount.Value = 0
+	brCount.Parent = leaderstats
+end
+
+Players.PlayerAdded:Connect(function(player)
+	ensureLeaderstats(player)
+end)
+
+-- función que hace invisible un character y luego restaura
+local function setInvisibleFor(character, seconds)
+	if not character then return end
+
+	-- almacenar estados previos
+	local originalStates = {}
+	for _, desc in ipairs(character:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			table.insert(originalStates, {inst = desc, Transparency = desc.Transparency, CanCollide = desc.CanCollide})
+			desc.Transparency = 1
+			desc.CanCollide = false
+		elseif desc:IsA("Decal") then
+			table.insert(originalStates, {inst = desc, Transparency = desc.Transparency})
+			desc.Transparency = 1
+		end
+	end
+
+	-- Restaurar después del tiempo
+	delay(seconds, function()
+		for _, info in ipairs(originalStates) do
+			local inst = info.inst
+			if inst and inst.Parent then
+				if info.Transparency ~= nil then
+					pcall(function() inst.Transparency = info.Transparency end)
+				end
+				if info.CanCollide ~= nil then
+					pcall(function() inst.CanCollide = info.CanCollide end)
+				end
+			end
+		end
+	end)
+end
+
+-- Crea una BillboardGui "STEALER" en la cabeza (durará 'seconds' y luego se borra)
+local function attachThiefTag(character, seconds)
+	if not character then return end
+	local head = character:FindFirstChild("Head")
+	if not head then return end
+
+	-- eliminar tag previa si existe
+	local existing = head:FindFirstChild("ThiefTag")
+	if existing then existing:Destroy() end
+
+	-- crear BillboardGui
+	local tag = Instance.new("BillboardGui")
+	tag.Name = "ThiefTag"
+	tag.Adornee = head
+	tag.Size = UDim2.new(0, 120, 0, 40)
+	tag.StudsOffset = Vector3.new(0, 2.2, 0)
+	tag.AlwaysOnTop = true
+	tag.Parent = head
+
+	local text = Instance.new("TextLabel")
+	text.Size = UDim2.new(1,0,1,0)
+	text.BackgroundTransparency = 1
+	text.Text = "STEALER"
+	text.Font = Enum.Font.SourceSansBold
+	text.TextScaled = true
+	text.Parent = tag
+
+	-- destruir después de 'seconds'
+	delay(seconds, function()
+		if tag and tag.Parent then
+			tag:Destroy()
+		end
+	end)
+end
+
+-- marcar jugador como ladrón (bool attribute) y eliminar marca pasado el tiempo
+local function markPlayerAsThief(player, seconds)
+	if not player then return end
+	player:SetAttribute("IsThief", true)
+
+	delay(seconds, function()
+		if player and player.Parent then
+			player:SetAttribute("IsThief", false)
+		end
+	end)
+end
+
+-- conectar prompts de cada Brainrot spawnado / existente
+local function connectBrainrot(brainrotModel)
+	if not brainrotModel or not brainrotModel.Parent then return end
+	local handle = brainrotModel:FindFirstChild("Handle") or brainrotModel.PrimaryPart
+	if not handle then return end
+
+	local prompt = handle:FindFirstChildOfClass("ProximityPrompt")
+	local picked = false
+
+	if prompt then
+		prompt.Triggered:Connect(function(player)
+			if picked then return end
+			picked = true
+
+			ensureLeaderstats(player)
+			local stat = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Brainrots")
+			if stat then stat.Value = stat.Value + 1 end
+
+			-- efecto server-side: invisibilidad y tag
+			local char = player.Character
+			if char then
+				setInvisibleFor(char, INVIS_DURATION)
+				attachThiefTag(char, INVIS_DURATION)
+			end
+
+			-- marcar jugador
+			markPlayerAsThief(player, INVIS_DURATION)
+
+			-- notificar a clientes (nombre y duración)
+			pcall(function()
+				STOLEN_EVENT:FireAllClients(player.Name, INVIS_DURATION)
+			end)
+
+			brainrotModel:Destroy()
+		end)
+	else
+		local debounce = false
+		handle.Touched:Connect(function(part)
+			if debounce then return end
+			local character = part:FindFirstAncestorWhichIsA("Model")
+			local player = game.Players:GetPlayerFromCharacter(character)
+			if player then
+				debounce = true
+				picked = true
+
+				ensureLeaderstats(player)
+				local stat = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Brainrots")
+				if stat then stat.Value = stat.Value + 1 end
+
+				local char = player.Character
+				if char then
+					setInvisibleFor(char, INVIS_DURATION)
+					attachThiefTag(char, INVIS_DURATION)
+				end
+
+				markPlayerAsThief(player, INVIS_DURATION)
+
+				pcall(function()
+					STOLEN_EVENT:FireAllClients(player.Name, INVIS_DURATION)
+				end)
+
+				brainrotModel:Destroy()
+				wait(PICKUP_COOLDOWN)
+				debounce = false
+			end
+		end)
+	end
+end
+
+-- conectar a new children de OUTPUT_FOLDER
+OUTPUT_FOLDER.ChildAdded:Connect(function(child)
+	wait(0.05)
+	connectBrainrot(child)
+end)
+
+-- conectar los ya existentes al correr script
+for _, v in ipairs(OUTPUT_FOLDER:GetChildren()) do
+	connectBrainrot(v)
+end
